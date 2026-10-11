@@ -1,0 +1,85 @@
+name: Campus Find CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run API tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: Validate Docker Compose
+        run: docker compose config --quiet
+
+  publish:
+    name: Build and publish Docker images
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set lowercase image owner
+        run: echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_OWNER }}/campus-find-api:${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_OWNER }}/campus-find-api:latest
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./client
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_OWNER }}/campus-find-web:${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_OWNER }}/campus-find-web:latest
+
+  deploy:
+    name: Deploy to Docker host
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_HOST != '' && vars.DEPLOY_USER != '' && vars.DEPLOY_PATH != ''
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy latest images
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.DEPLOY_HOST }}
+          username: ${{ vars.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd "${{ vars.DEPLOY_PATH }}"
+            IMAGE_OWNER=$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+            IMAGE_OWNER="$IMAGE_OWNER" docker compose -f docker-compose.deploy.yml pull
+            IMAGE_OWNER="$IMAGE_OWNER" docker compose -f docker-compose.deploy.yml up -d --remove-orphans
