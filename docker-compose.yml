@@ -26,6 +26,7 @@ services:
       context: .
       dockerfile: client/Dockerfile
     image: campus-find-web:local
+    command: ["sh", "-c", "echo 'Campus Find is available at http://localhost:8080'; exec nginx -g 'daemon off;'"]
     ports:
       - "8080:80"
     depends_on:

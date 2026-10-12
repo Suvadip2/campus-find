@@ -1,6 +1,46 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const categories = ['All items', 'Electronics', 'Keys', 'Bags', 'Books', 'Clothing', 'Other'];
+const sessionTokenKey = 'campus-find-session-token';
+
+async function apiFetch(input, init = {}) {
+  const headers = new Headers(init.headers);
+  const token = window.sessionStorage.getItem(sessionTokenKey);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(input, { ...init, headers, credentials: 'omit' });
+  if (response.status === 401) {
+    window.sessionStorage.removeItem(sessionTokenKey);
+    if (window.location.pathname !== '/login') window.location.replace('/login');
+  }
+  return response;
+}
+
+function usePolling(refresh, intervalMs) {
+  useEffect(() => {
+    let running = false;
+    const run = async () => {
+      if (running || document.visibilityState === 'hidden') return;
+      running = true;
+      try {
+        await refresh();
+      } finally {
+        running = false;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') run();
+    };
+    run();
+    const interval = window.setInterval(run, intervalMs);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', run);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', run);
+    };
+  }, [refresh, intervalMs]);
+}
 
 function formatDate(value) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(value));
@@ -33,10 +73,12 @@ function LoginPage() {
       const response = await fetch(mode === 'register' ? '/api/auth/register' : '/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'omit',
         body: JSON.stringify(mode === 'register' ? payload : { ...payload, role })
       });
       const result = await parseApiResponse(response);
       if (!response.ok) throw new Error(result.error || 'Could not sign in.');
+      window.sessionStorage.setItem(sessionTokenKey, result.token);
       window.location.assign(result.user.role === 'admin' ? '/admin' : '/');
     } catch (error) {
       setMessage(error.message);
@@ -124,11 +166,12 @@ function LostFoundBoard({ user }) {
   const [loading, setLoading] = useState(true);
   const [matches, setMatches] = useState([]);
   const [confirmingMatchId, setConfirmingMatchId] = useState(null);
+  const [editingItemId, setEditingItemId] = useState(null);
 
   const loadItems = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
     try {
-      const response = await fetch('/api/items');
+      const response = await apiFetch('/api/items');
       if (!response.ok) throw new Error('Could not load campus listings.');
       setItems(await response.json());
     } catch (error) {
@@ -140,7 +183,7 @@ function LostFoundBoard({ user }) {
 
   const loadMatches = useCallback(async () => {
     try {
-      const response = await fetch('/api/matches');
+      const response = await apiFetch('/api/matches');
       if (!response.ok) throw new Error('Could not load possible matches.');
       setMatches(await response.json());
     } catch (error) {
@@ -150,7 +193,7 @@ function LostFoundBoard({ user }) {
 
   const loadMyItems = useCallback(async () => {
     try {
-      const response = await fetch('/api/my/items');
+      const response = await apiFetch('/api/my/items');
       if (!response.ok) throw new Error('Could not load your listings.');
       setMyItems(await response.json());
     } catch (error) {
@@ -158,20 +201,12 @@ function LostFoundBoard({ user }) {
     }
   }, []);
 
-  useEffect(() => {
-    loadItems();
-    loadMyItems();
-  }, [loadItems, loadMyItems]);
-
-  useEffect(() => {
-    loadMatches();
-    const refresh = window.setInterval(() => {
-      loadItems(false);
-      loadMatches();
-      loadMyItems();
-    }, 5000);
-    return () => window.clearInterval(refresh);
-  }, [loadItems, loadMatches, loadMyItems]);
+  const refreshBoard = useCallback(() => Promise.all([
+    loadItems(false),
+    loadMatches(),
+    loadMyItems()
+  ]), [loadItems, loadMatches, loadMyItems]);
+  usePolling(refreshBoard, 3000);
 
   const filteredItems = useMemo(() => items.filter((item) => {
     const matchesCategory = category === 'All items' || item.category === category;
@@ -197,7 +232,7 @@ function LostFoundBoard({ user }) {
       } else {
         payload.delete('image');
       }
-      const response = await fetch('/api/items', { method: 'POST', body: payload });
+      const response = await apiFetch('/api/items', { method: 'POST', body: payload });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not submit your listing.');
       formElement.reset();
@@ -207,6 +242,40 @@ function LostFoundBoard({ user }) {
         : 'Your listing has been posted.');
       await Promise.all([loadItems(), loadMyItems()]);
       await loadMatches();
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function updateListing(event, id) {
+    event.preventDefault();
+    const fields = Object.fromEntries(new FormData(event.currentTarget).entries());
+    try {
+      const response = await apiFetch(`/api/items/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not update your listing.');
+      setEditingItemId(null);
+      setMessage(result.possibleMatch
+        ? 'Your listing was updated and a possible match was found. Both owners must confirm the return.'
+        : 'Your listing was updated.');
+      await refreshBoard();
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function deleteListing(id) {
+    if (!window.confirm('Delete this listing? This cannot be undone.')) return;
+    try {
+      const response = await apiFetch(`/api/items/${id}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not delete your listing.');
+      setMessage('Your listing was deleted.');
+      await refreshBoard();
     } catch (error) {
       setMessage(error.message);
     }
@@ -239,7 +308,7 @@ function LostFoundBoard({ user }) {
 
   async function resolveItem(id) {
     try {
-      const response = await fetch(`/api/items/${id}/resolve`, { method: 'PATCH' });
+      const response = await apiFetch(`/api/items/${id}/resolve`, { method: 'PATCH' });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not update this listing.');
       await Promise.all([loadItems(false), loadMyItems()]);
@@ -251,7 +320,7 @@ function LostFoundBoard({ user }) {
   async function confirmReturned(matchId) {
     setConfirmingMatchId(matchId);
     try {
-      const response = await fetch(`/api/matches/${matchId}/confirm-returned`, { method: 'POST' });
+      const response = await apiFetch(`/api/matches/${matchId}/confirm-returned`, { method: 'POST' });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not confirm this return.');
       setMessage(result.resolved
@@ -269,7 +338,7 @@ function LostFoundBoard({ user }) {
     const reason = window.prompt('Why should this listing be reviewed?');
     if (reason === null) return;
     try {
-      const response = await fetch(`/api/items/${id}/reports`, {
+      const response = await apiFetch(`/api/items/${id}/reports`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason })
@@ -284,8 +353,9 @@ function LostFoundBoard({ user }) {
 
   async function logout() {
     try {
-      const response = await fetch('/api/auth/logout', { method: 'POST' });
+      const response = await apiFetch('/api/auth/logout', { method: 'POST' });
       if (!response.ok) throw new Error('Could not sign out.');
+      window.sessionStorage.removeItem(sessionTokenKey);
       setItems([]);
       setMyItems([]);
       setMatches([]);
@@ -384,12 +454,34 @@ function LostFoundBoard({ user }) {
                 </div>
                 <h3>{item.title}</h3>
                 <p className="item-description">{item.description}</p>
+                {editingItemId === item.id && (
+                  <form className="item-edit-form" onSubmit={(event) => updateListing(event, item.id)}>
+                    <label>Item name<input name="title" defaultValue={item.title} maxLength="80" required /></label>
+                    <label>Where was it seen?<input name="location" defaultValue={item.location} maxLength="100" required /></label>
+                    <label className="field-wide">Description<textarea name="description" defaultValue={item.description} maxLength="500" rows="3" required /></label>
+                    <label>Brand<input name="brand" defaultValue={item.brand ?? ''} maxLength="80" /></label>
+                    <label>Color<input name="color" defaultValue={item.color ?? ''} maxLength="40" /></label>
+                    <div className="item-edit-actions field-wide">
+                      <button className="button button-dark" type="submit">Save changes</button>
+                      <button className="button button-light" type="button" onClick={() => setEditingItemId(null)}>Cancel</button>
+                    </div>
+                  </form>
+                )}
                 <div className="card-location"><span>⌖</span> {item.location}</div>
                 <div className="card-footer">
                   <span>{formatDate(item.createdAt)}</span>
-                  {canResolve(item)
-                    ? <button onClick={() => resolveItem(item.id)}>Mark resolved ✓</button>
-                    : item.status === 'resolved' ? <span className="resolved-label">REUNITED ✓</span> : null}
+                  <div className="owner-listing-actions">
+                    {canResolve(item) && <button onClick={() => resolveItem(item.id)}>Mark resolved ✓</button>}
+                    {item.status === 'open' && (
+                      <>
+                        <button onClick={() => setEditingItemId((current) => current === item.id ? null : item.id)}>
+                          {editingItemId === item.id ? 'Close edit' : 'Edit'}
+                        </button>
+                        <button onClick={() => deleteListing(item.id)}>Delete</button>
+                      </>
+                    )}
+                    {item.status === 'resolved' && <span className="resolved-label">REUNITED ✓</span>}
+                  </div>
                 </div>
               </article>
             ))}
@@ -475,7 +567,7 @@ function AdminDashboard({ user }) {
 
   const loadDashboard = useCallback(async () => {
     try {
-      const response = await fetch('/api/admin/dashboard');
+      const response = await apiFetch('/api/admin/dashboard');
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not load the admin dashboard.');
       setDashboard(result);
@@ -487,15 +579,11 @@ function AdminDashboard({ user }) {
     }
   }, []);
 
-  useEffect(() => {
-    loadDashboard();
-    const refresh = window.setInterval(loadDashboard, 5000);
-    return () => window.clearInterval(refresh);
-  }, [loadDashboard]);
+  usePolling(loadDashboard, 3000);
 
   async function dismissReport(id) {
     try {
-      const response = await fetch(`/api/admin/reports/${id}`, {
+      const response = await apiFetch(`/api/admin/reports/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'dismiss' })
@@ -513,7 +601,7 @@ function AdminDashboard({ user }) {
     const reason = window.prompt('Enter the moderation reason. This will be saved in the audit trail.');
     if (reason === null) return;
     try {
-      const response = await fetch(`/api/admin/items/${id}/remove`, {
+      const response = await apiFetch(`/api/admin/items/${id}/remove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason })
@@ -529,8 +617,9 @@ function AdminDashboard({ user }) {
 
   async function logout() {
     try {
-      const response = await fetch('/api/auth/logout', { method: 'POST' });
+      const response = await apiFetch('/api/auth/logout', { method: 'POST' });
       if (!response.ok) throw new Error('Could not sign out.');
+      window.sessionStorage.removeItem(sessionTokenKey);
       setDashboard(null);
       window.location.replace('/login');
     } catch (error) {
@@ -744,7 +833,13 @@ export default function App() {
   const verifySession = useCallback(async () => {
     setAuthState('checking');
     try {
-      const response = await fetch('/api/auth/me', { cache: 'no-store' });
+      const response = await apiFetch('/api/auth/me', { cache: 'no-store' });
+      if (response.status === 401) {
+        setSessionUser(null);
+        setAuthState('unauthenticated');
+        if (window.location.pathname !== '/login') window.location.replace('/login');
+        return;
+      }
       if (!response.ok) throw new Error('Could not verify your sign-in. Please try again.');
       const result = await response.json();
       if (result.user) {

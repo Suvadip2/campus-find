@@ -8,6 +8,7 @@ const scrypt = promisify(scryptCallback);
 const directory = path.resolve(process.env.DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data'));
 const dataFile = path.join(directory, 'auth.json');
 const sessionLifetime = 7 * 24 * 60 * 60 * 1000;
+let writeQueue = Promise.resolve();
 
 async function readAuthData() {
   await mkdir(directory, { recursive: true });
@@ -24,6 +25,17 @@ async function saveAuthData(data) {
   const temporaryFile = `${dataFile}.tmp`;
   await writeFile(temporaryFile, JSON.stringify(data, null, 2), { mode: 0o600 });
   await rename(temporaryFile, dataFile);
+}
+
+function updateAuthData(update) {
+  const operation = writeQueue.then(async () => {
+    const data = await readAuthData();
+    const result = await update(data);
+    await saveAuthData(data);
+    return result;
+  });
+  writeQueue = operation.catch(() => {});
+  return operation;
 }
 
 export function publicUser(user) {
@@ -53,33 +65,33 @@ export async function initializeAdmin() {
     throw new Error('ADMIN_EMAIL must be valid and ADMIN_PASSWORD must be 6–128 characters.');
   }
 
-  const data = await readAuthData();
-  if (data.users.some((user) => user.email === email)) return;
-  data.users.push({
-    id: randomUUID(),
-    name: 'Campus administrator',
-    email,
-    role: 'admin',
-    passwordHash: await hashPassword(password),
-    createdAt: new Date().toISOString()
+  await updateAuthData(async (data) => {
+    if (data.users.some((user) => user.email === email)) return;
+    data.users.push({
+      id: randomUUID(),
+      name: 'Campus administrator',
+      email,
+      role: 'admin',
+      passwordHash: await hashPassword(password),
+      createdAt: new Date().toISOString()
+    });
   });
-  await saveAuthData(data);
 }
 
 export async function registerStudent({ name, email, password }) {
-  const data = await readAuthData();
-  if (data.users.some((user) => user.email === email)) return null;
-  const user = {
-    id: randomUUID(),
-    name,
-    email,
-    role: 'student',
-    passwordHash: await hashPassword(password),
-    createdAt: new Date().toISOString()
-  };
-  data.users.push(user);
-  await saveAuthData(data);
-  return user;
+  return updateAuthData(async (data) => {
+    if (data.users.some((user) => user.email === email)) return null;
+    const user = {
+      id: randomUUID(),
+      name,
+      email,
+      role: 'student',
+      passwordHash: await hashPassword(password),
+      createdAt: new Date().toISOString()
+    };
+    data.users.push(user);
+    return user;
+  });
 }
 
 export async function authenticateUser(email, password, role) {
@@ -93,16 +105,16 @@ export async function authenticateUser(email, password, role) {
 }
 
 export async function createSession(userId) {
-  const data = await readAuthData();
-  const now = Date.now();
-  data.sessions = data.sessions.filter((session) => session.expiresAt > now);
   const token = randomBytes(32).toString('base64url');
-  data.sessions.push({
-    tokenHash: createHash('sha256').update(token).digest('hex'),
-    userId,
-    expiresAt: now + sessionLifetime
+  await updateAuthData((data) => {
+    const now = Date.now();
+    data.sessions = data.sessions.filter((session) => session.expiresAt > now);
+    data.sessions.push({
+      tokenHash: createHash('sha256').update(token).digest('hex'),
+      userId,
+      expiresAt: now + sessionLifetime
+    });
   });
-  await saveAuthData(data);
   return { token, maxAge: sessionLifetime };
 }
 
@@ -117,7 +129,7 @@ export async function userForSession(token) {
 export async function deleteSession(token) {
   if (!token) return;
   const tokenHash = createHash('sha256').update(token).digest('hex');
-  const data = await readAuthData();
-  data.sessions = data.sessions.filter((session) => session.tokenHash !== tokenHash);
-  await saveAuthData(data);
+  await updateAuthData((data) => {
+    data.sessions = data.sessions.filter((session) => session.tokenHash !== tokenHash);
+  });
 }

@@ -53,29 +53,14 @@ app.use('/api', (_request, response, next) => {
   next();
 });
 
-function readCookie(request, name) {
-  const entry = request.headers.cookie?.split(';').map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith(`${name}=`));
-  if (!entry) return null;
-  try {
-    return decodeURIComponent(entry.slice(name.length + 1));
-  } catch {
-    return null;
-  }
-}
-
-function sessionCookieOptions(request, maxAge) {
-  return {
-    httpOnly: true,
-    secure: request.secure,
-    sameSite: 'strict',
-    path: '/',
-    maxAge
-  };
+function readSessionToken(request) {
+  const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(request.get('authorization') ?? '');
+  return match?.[1] ?? null;
 }
 
 async function requireUser(request, response, next) {
   try {
-    const user = await userForSession(readCookie(request, 'campus_find_session'));
+    const user = await userForSession(readSessionToken(request));
     if (!user) return response.status(401).json({ error: 'Sign in to continue.' });
     request.user = user;
     next();
@@ -117,6 +102,37 @@ function matchForUser(item, counterpart, userId) {
   };
 }
 
+function clearMatch(item, counterpart) {
+  for (const listing of [item, counterpart]) {
+    delete listing.matchId;
+    delete listing.matchedItemId;
+    delete listing.matchScore;
+    delete listing.matchDetails;
+    delete listing.matchConfirmations;
+  }
+}
+
+function connectPossibleMatch(items, item, userId) {
+  const candidate = items
+    .map((listing) => ({ listing, result: evaluatePossibleMatch(item, listing) }))
+    .filter(({ listing, result }) => result && !listing.matchId)
+    .sort((left, right) => right.result.score - left.result.score)[0];
+  if (!candidate) return null;
+
+  const matchId = randomUUID();
+  item.matchId = matchId;
+  item.matchedItemId = candidate.listing.id;
+  item.matchScore = candidate.result.score;
+  item.matchDetails = candidate.result.details;
+  item.matchConfirmations = [];
+  candidate.listing.matchId = matchId;
+  candidate.listing.matchedItemId = item.id;
+  candidate.listing.matchScore = candidate.result.score;
+  candidate.listing.matchDetails = candidate.result.details;
+  candidate.listing.matchConfirmations = [];
+  return matchForUser(item, candidate.listing, userId);
+}
+
 function loginRateLimit(request, response, next) {
   const attempts = loginAttempts.get(request.ip);
   if (!attempts || attempts.resetAt <= Date.now()) {
@@ -155,8 +171,7 @@ app.post('/api/auth/register', async (request, response, next) => {
     const user = await registerStudent({ name, email, password });
     if (!user) return response.status(409).json({ error: 'An account with this email already exists.' });
     const session = await createSession(user.id);
-    response.cookie('campus_find_session', session.token, sessionCookieOptions(request, session.maxAge));
-    response.status(201).json({ user: publicUser(user) });
+    response.status(201).json({ user: publicUser(user), token: session.token });
   } catch (error) {
     next(error);
   }
@@ -179,8 +194,7 @@ app.post('/api/auth/login', loginRateLimit, async (request, response, next) => {
     }
     clearFailedLogins(request);
     const session = await createSession(user.id);
-    response.cookie('campus_find_session', session.token, sessionCookieOptions(request, session.maxAge));
-    response.json({ user: publicUser(user) });
+    response.json({ user: publicUser(user), token: session.token });
   } catch (error) {
     next(error);
   }
@@ -188,7 +202,7 @@ app.post('/api/auth/login', loginRateLimit, async (request, response, next) => {
 
 app.get('/api/auth/me', async (request, response, next) => {
   try {
-    const user = await userForSession(readCookie(request, 'campus_find_session'));
+    const user = await userForSession(readSessionToken(request));
     response.set('Cache-Control', 'no-store').json({ user: user ? publicUser(user) : null });
   } catch (error) {
     next(error);
@@ -197,8 +211,7 @@ app.get('/api/auth/me', async (request, response, next) => {
 
 app.post('/api/auth/logout', async (request, response, next) => {
   try {
-    await deleteSession(readCookie(request, 'campus_find_session'));
-    response.clearCookie('campus_find_session', sessionCookieOptions(request, 0));
+    await deleteSession(readSessionToken(request));
     response.status(204).end();
   } catch (error) {
     next(error);
@@ -314,31 +327,85 @@ app.post('/api/items', requireUser, (request, response, next) => {
         status: listingStatus.ACTIVE,
         createdAt: new Date().toISOString()
       };
-      const possibleMatches = items
-        .map((candidate) => ({ candidate, result: evaluatePossibleMatch(item, candidate) }))
-        .filter(({ candidate, result }) => result && !candidate.matchId)
-        .sort((left, right) => right.result.score - left.result.score);
-
-      let match = null;
-      const candidate = possibleMatches[0];
-      if (candidate) {
-        const matchId = randomUUID();
-        item.matchId = matchId;
-        item.matchedItemId = candidate.candidate.id;
-        item.matchScore = candidate.result.score;
-        item.matchDetails = candidate.result.details;
-        item.matchConfirmations = [];
-        candidate.candidate.matchId = matchId;
-        candidate.candidate.matchedItemId = item.id;
-        candidate.candidate.matchScore = candidate.result.score;
-        candidate.candidate.matchDetails = candidate.result.details;
-        candidate.candidate.matchConfirmations = [];
-        match = matchForUser(item, candidate.candidate, request.user.id);
-      }
+      const match = connectPossibleMatch(items, item, request.user.id);
       items.unshift(item);
       return { item: publicListing(item), match };
     });
     response.status(201).json({ ...result.item, possibleMatch: result.match });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/items/:id', requireUser, async (request, response, next) => {
+  if (request.user.role !== 'student') {
+    return response.status(403).json({ error: 'Only student accounts can edit listings.' });
+  }
+  const editableFields = ['title', 'description', 'location', 'brand', 'color'];
+  const updates = request.body ?? {};
+  const keys = Object.keys(updates);
+  if (keys.length === 0 || keys.some((key) => !editableFields.includes(key)) ||
+    keys.some((key) => typeof updates[key] !== 'string')) {
+    return response.status(400).json({ error: 'Provide valid listing fields to update.' });
+  }
+  const limits = { title: 80, description: 500, location: 100, brand: 80, color: 40 };
+  if (Object.entries(updates).some(([key, value]) =>
+    value.length > limits[key] || (['title', 'description', 'location'].includes(key) && !value.trim()))) {
+    return response.status(400).json({ error: 'One or more fields are empty or exceed the allowed length.' });
+  }
+
+  try {
+    const result = await updateItems((items) => {
+      const item = items.find((entry) => entry.id === request.params.id);
+      if (!item) return { status: 404, error: 'Listing not found.' };
+      if (item.ownerId !== request.user.id) {
+        return { status: 403, error: 'You can only edit listings you posted.' };
+      }
+      if (!isActiveListing(item)) return { status: 409, error: 'Only active listings can be edited.' };
+
+      if (item.matchId) {
+        const counterpart = items.find((entry) => entry.id === item.matchedItemId && entry.matchId === item.matchId);
+        if (counterpart) clearMatch(item, counterpart);
+      }
+      for (const [key, value] of Object.entries(updates)) {
+        item[key] = value.trim();
+      }
+      return {
+        status: 200,
+        item: publicListing(item),
+        possibleMatch: connectPossibleMatch(items, item, request.user.id)
+      };
+    });
+    if (result.status !== 200) return response.status(result.status).json({ error: result.error });
+    response.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/items/:id', requireUser, async (request, response, next) => {
+  if (request.user.role !== 'student') {
+    return response.status(403).json({ error: 'Only student accounts can delete listings.' });
+  }
+  try {
+    const result = await updateItems((items) => {
+      const index = items.findIndex((entry) => entry.id === request.params.id);
+      if (index === -1) return { status: 404, error: 'Listing not found.' };
+      const item = items[index];
+      if (item.ownerId !== request.user.id) {
+        return { status: 403, error: 'You can only delete listings you posted.' };
+      }
+      if (!isActiveListing(item)) return { status: 409, error: 'Only active listings can be deleted.' };
+
+      if (item.matchId) {
+        const counterpart = items.find((entry) => entry.id === item.matchedItemId && entry.matchId === item.matchId);
+        if (counterpart) clearMatch(item, counterpart);
+      }
+      items.splice(index, 1);
+      return { status: 200, id: item.id };
+    });
+    if (result.status !== 200) return response.status(result.status).json({ error: result.error });
+    response.json({ id: result.id });
   } catch (error) {
     next(error);
   }

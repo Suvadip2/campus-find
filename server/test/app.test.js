@@ -14,12 +14,12 @@ const [{ app }, { initializeAdmin }] = await Promise.all([
 ]);
 let server;
 let baseUrl;
-let studentCookie;
+let studentToken;
 let studentId;
 let studentItemId;
-let adminCookie;
-let foundOwnerCookie;
-let unrelatedOwnerCookie;
+let adminToken;
+let foundOwnerToken;
+let unrelatedOwnerToken;
 let lostMatchId;
 let foundMatchId;
 
@@ -28,7 +28,7 @@ async function postJson(pathname, body, cookie) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(cookie ? { Cookie: cookie } : {})
+      ...(cookie ? { Authorization: `Bearer ${cookie}` } : {})
     },
     body: JSON.stringify(body)
   });
@@ -67,10 +67,11 @@ test('registers a student, starts a session, and creates a listing', async () =>
     password: 'stud12'
   });
   assert.equal(registered.status, 201);
-  assert.match(registered.headers.get('set-cookie'), /HttpOnly/i);
-  assert.match(registered.headers.get('set-cookie'), /SameSite=Strict/i);
-  studentCookie = registered.headers.get('set-cookie').split(';')[0];
-  const user = (await registered.json()).user;
+  assert.equal(registered.headers.get('set-cookie'), null);
+  const registration = await registered.json();
+  studentToken = registration.token;
+  assert.ok(studentToken);
+  const user = registration.user;
   studentId = user.id;
   assert.equal(user.role, 'student');
 
@@ -88,9 +89,9 @@ test('registers a student, starts a session, and creates a listing', async () =>
   });
   assert.equal(weakPassword.status, 400);
 
-  const currentUser = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: studentCookie } });
+  const currentUser = await fetch(`${baseUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${studentToken}` } });
   assert.equal((await currentUser.json()).user.id, studentId);
-  const authorizedListings = await fetch(`${baseUrl}/api/items`, { headers: { Cookie: studentCookie } });
+  const authorizedListings = await fetch(`${baseUrl}/api/items`, { headers: { Authorization: `Bearer ${studentToken}` } });
   assert.equal(authorizedListings.status, 200);
   assert.equal((await authorizedListings.json()).length, 4);
 
@@ -107,7 +108,7 @@ test('registers a student, starts a session, and creates a listing', async () =>
     brand: 'Moleskine',
     color: 'red'
   };
-  const created = await postJson('/api/items', payload, studentCookie);
+  const created = await postJson('/api/items', payload, studentToken);
   assert.equal(created.status, 201);
   const item = await created.json();
   studentItemId = item.id;
@@ -116,11 +117,11 @@ test('registers a student, starts a session, and creates a listing', async () =>
   assert.equal(item.ownerId, studentId);
   assert.equal(item.brand, payload.brand);
   assert.equal(item.color, payload.color);
-  const ownListings = await fetch(`${baseUrl}/api/my/items`, { headers: { Cookie: studentCookie } });
+  const ownListings = await fetch(`${baseUrl}/api/my/items`, { headers: { Authorization: `Bearer ${studentToken}` } });
   assert.equal(ownListings.status, 200);
   assert.ok((await ownListings.json()).some((entry) => entry.id === studentItemId));
 
-  const invalid = await postJson('/api/items', { ...payload, category: 'Invalid' }, studentCookie);
+  const invalid = await postJson('/api/items', { ...payload, category: 'Invalid' }, studentToken);
   assert.equal(invalid.status, 400);
 
   const photo = new FormData();
@@ -133,7 +134,7 @@ test('registers a student, starts a session, and creates a listing', async () =>
   ], { type: 'image/png' }), 'notebook.png');
   const photoResponse = await fetch(`${baseUrl}/api/items`, {
     method: 'POST',
-    headers: { Cookie: studentCookie },
+    headers: { Authorization: `Bearer ${studentToken}` },
     body: photo
   });
   assert.equal(photoResponse.status, 201);
@@ -147,7 +148,7 @@ test('registers a student, starts a session, and creates a listing', async () =>
   spoofedPhoto.set('image', new Blob(['not an image'], { type: 'image/png' }), 'spoof.png');
   const spoofedResponse = await fetch(`${baseUrl}/api/items`, {
     method: 'POST',
-    headers: { Cookie: studentCookie },
+    headers: { Authorization: `Bearer ${studentToken}` },
     body: spoofedPhoto
   });
   assert.equal(spoofedResponse.status, 400);
@@ -159,7 +160,7 @@ test('registers a student, starts a session, and creates a listing', async () =>
   unsupportedPhoto.set('image', new Blob(['not an image'], { type: 'image/svg+xml' }), 'spoof.svg');
   const unsupportedResponse = await fetch(`${baseUrl}/api/items`, {
     method: 'POST',
-    headers: { Cookie: studentCookie },
+    headers: { Authorization: `Bearer ${studentToken}` },
     body: unsupportedPhoto
   });
   assert.equal(unsupportedResponse.status, 400);
@@ -172,7 +173,7 @@ test('matches opposing listings, requires both owners, and retains resolved hist
     password: 'find12'
   });
   assert.equal(foundRegistration.status, 201);
-  foundOwnerCookie = foundRegistration.headers.get('set-cookie').split(';')[0];
+  foundOwnerToken = (await foundRegistration.json()).token;
 
   const found = await postJson('/api/items', {
     title: 'Moleskine notebook',
@@ -182,7 +183,7 @@ test('matches opposing listings, requires both owners, and retains resolved hist
     location: 'Lecture Hall 2',
     brand: 'Moleskine',
     color: 'red'
-  }, foundOwnerCookie);
+  }, foundOwnerToken);
   assert.equal(found.status, 201);
   const foundBody = await found.json();
   foundMatchId = foundBody.id;
@@ -194,7 +195,7 @@ test('matches opposing listings, requires both owners, and retains resolved hist
   assert.ok(foundBody.possibleMatch.details.includes('brand'));
   assert.ok(foundBody.possibleMatch.details.includes('color'));
 
-  const lostNotifications = await fetch(`${baseUrl}/api/matches`, { headers: { Cookie: studentCookie } });
+  const lostNotifications = await fetch(`${baseUrl}/api/matches`, { headers: { Authorization: `Bearer ${studentToken}` } });
   const lostMatches = await lostNotifications.json();
   assert.equal(lostMatches.length, 1);
   assert.equal(lostMatches[0].confirmedByCurrentUser, false);
@@ -205,10 +206,10 @@ test('matches opposing listings, requires both owners, and retains resolved hist
     password: 'unrel1'
   });
   assert.equal(unrelatedRegistration.status, 201);
-  unrelatedOwnerCookie = unrelatedRegistration.headers.get('set-cookie').split(';')[0];
+  unrelatedOwnerToken = (await unrelatedRegistration.json()).token;
   const unauthorized = await fetch(`${baseUrl}/api/matches/${foundBody.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: unrelatedOwnerCookie }
+    headers: { Authorization: `Bearer ${unrelatedOwnerToken}` }
   });
   assert.equal(unauthorized.status, 403);
 
@@ -220,14 +221,14 @@ test('matches opposing listings, requires both owners, and retains resolved hist
     location: 'Lecture Hall 2',
     brand: 'Moleskine',
     color: 'red'
-  }, studentCookie);
+  }, studentToken);
   assert.equal(duplicateLost.status, 201);
   const duplicateLostBody = await duplicateLost.json();
   assert.equal(duplicateLostBody.possibleMatch, null);
 
   const lostConfirmation = await fetch(`${baseUrl}/api/matches/${foundBody.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(lostConfirmation.status, 200);
   const firstConfirmation = await lostConfirmation.json();
@@ -235,7 +236,7 @@ test('matches opposing listings, requires both owners, and retains resolved hist
   assert.equal(firstConfirmation.confirmationCount, 1);
 
   const activeAfterOneConfirmation = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.ok(activeAfterOneConfirmation.some((item) => item.id === lostMatchId));
   assert.ok(activeAfterOneConfirmation.some((item) => item.id === foundMatchId));
@@ -243,19 +244,19 @@ test('matches opposing listings, requires both owners, and retains resolved hist
 
   const duplicateConfirmation = await fetch(`${baseUrl}/api/matches/${foundBody.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(duplicateConfirmation.status, 409);
 
   const foundConfirmation = await fetch(`${baseUrl}/api/matches/${foundBody.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: foundOwnerCookie }
+    headers: { Authorization: `Bearer ${foundOwnerToken}` }
   });
   assert.equal(foundConfirmation.status, 200);
   assert.equal((await foundConfirmation.json()).resolved, true);
 
   const activeAfterResolution = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.ok(!activeAfterResolution.some((item) => [lostMatchId, foundMatchId].includes(item.id)));
   assert.ok(activeAfterResolution.some((item) => item.id === duplicateLostBody.id));
@@ -267,12 +268,12 @@ test('matches opposing listings, requires both owners, and retains resolved hist
   assert.ok(history.some((item) => item.id === lostMatchId));
   assert.ok(history.some((item) => item.id === foundMatchId));
   const ownHistory = await (await fetch(`${baseUrl}/api/my/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.equal(ownHistory.find((item) => item.id === lostMatchId).status, 'resolved');
 
   const matchesAfterResolution = await (await fetch(`${baseUrl}/api/matches`, {
-    headers: { Cookie: foundOwnerCookie }
+    headers: { Authorization: `Bearer ${foundOwnerToken}` }
   })).json();
   assert.equal(matchesAfterResolution.length, 0);
 });
@@ -280,13 +281,13 @@ test('matches opposing listings, requires both owners, and retains resolved hist
 test('enforces account roles and signs the student out', async () => {
   const studentResolvesOthersItem = await fetch(`${baseUrl}/api/items/sample-1/resolve`, {
     method: 'PATCH',
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(studentResolvesOthersItem.status, 403);
 
   const ownItem = await fetch(`${baseUrl}/api/items/${studentItemId}/resolve`, {
     method: 'PATCH',
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(ownItem.status, 409);
 
@@ -296,8 +297,15 @@ test('enforces account roles and signs the student out', async () => {
     role: 'admin'
   });
   assert.equal(adminLogin.status, 200);
-  adminCookie = adminLogin.headers.get('set-cookie').split(';')[0];
-  assert.equal((await adminLogin.json()).user.role, 'admin');
+  const adminSession = await adminLogin.json();
+  adminToken = adminSession.token;
+  assert.equal(adminSession.user.role, 'admin');
+  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${studentToken}` }
+  })).json()).user.role, 'student');
+  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  })).json()).user.role, 'admin');
 
   const wrongRole = await postJson('/api/auth/login', {
     email: 'admin@example.edu',
@@ -308,24 +316,27 @@ test('enforces account roles and signs the student out', async () => {
 
   const resolved = await fetch(`${baseUrl}/api/items/sample-1/resolve`, {
     method: 'PATCH',
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   });
   assert.equal(resolved.status, 403);
   assert.equal((await fetch(`${baseUrl}/api/my/items`, {
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   })).status, 403);
   assert.equal((await fetch(`${baseUrl}/api/items/missing/resolve`, {
     method: 'PATCH',
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   })).status, 404);
 
   const logout = await fetch(`${baseUrl}/api/auth/logout`, {
     method: 'POST',
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(logout.status, 204);
-  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: studentCookie } })).json()).user, null);
-  assert.equal((await fetch(`${baseUrl}/api/items`, { headers: { Cookie: studentCookie } })).status, 401);
+  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${studentToken}` } })).json()).user, null);
+  assert.equal((await fetch(`${baseUrl}/api/items`, { headers: { Authorization: `Bearer ${studentToken}` } })).status, 401);
+  assert.equal((await fetch(`${baseUrl}/api/admin/dashboard`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  })).status, 200);
 
   const studentLogin = await postJson('/api/auth/login', {
     email: 'student@example.edu',
@@ -333,10 +344,77 @@ test('enforces account roles and signs the student out', async () => {
     role: 'student'
   });
   assert.equal(studentLogin.status, 200);
-  const newStudentCookie = studentLogin.headers.get('set-cookie').split(';')[0];
-  studentCookie = newStudentCookie;
-  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: newStudentCookie } })).json()).user.id, studentId);
-  assert.equal((await fetch(`${baseUrl}/api/items`, { headers: { Cookie: newStudentCookie } })).status, 200);
+  const newStudentToken = (await studentLogin.json()).token;
+  studentToken = newStudentToken;
+  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${newStudentToken}` } })).json()).user.id, studentId);
+  assert.equal((await fetch(`${baseUrl}/api/items`, { headers: { Authorization: `Bearer ${newStudentToken}` } })).status, 200);
+  assert.equal((await (await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  })).json()).user.role, 'admin');
+});
+
+test('student listing changes are persisted and visible to admin board polling', async () => {
+  const created = await postJson('/api/items', {
+    title: 'Orange water bottle',
+    description: 'Small orange bottle with a black cap',
+    category: 'Other',
+    type: 'found',
+    location: 'Gym lobby'
+  }, studentToken);
+  assert.equal(created.status, 201);
+  const item = await created.json();
+
+  const adminAfterCreate = await (await fetch(`${baseUrl}/api/admin/dashboard`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  })).json();
+  assert.ok(adminAfterCreate.activeListings.some((listing) => listing.id === item.id));
+
+  const updated = await fetch(`${baseUrl}/api/items/${item.id}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${studentToken}`
+    },
+    body: JSON.stringify({ title: 'Orange steel water bottle', location: 'Gym entrance' })
+  });
+  assert.equal(updated.status, 200);
+  const updatedItem = (await updated.json()).item;
+  assert.equal(updatedItem.title, 'Orange steel water bottle');
+  assert.equal(updatedItem.location, 'Gym entrance');
+
+  const studentAfterUpdate = await (await fetch(`${baseUrl}/api/items`, {
+    headers: { Authorization: `Bearer ${studentToken}` }
+  })).json();
+  assert.equal(studentAfterUpdate.find((listing) => listing.id === item.id).title, 'Orange steel water bottle');
+  const adminAfterUpdate = await (await fetch(`${baseUrl}/api/admin/dashboard`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  })).json();
+  assert.equal(adminAfterUpdate.activeListings.find((listing) => listing.id === item.id).title, 'Orange steel water bottle');
+
+  const adminEdit = await fetch(`${baseUrl}/api/items/${item.id}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({ title: 'Admin cannot edit student post' })
+  });
+  assert.equal(adminEdit.status, 403);
+
+  const deleted = await fetch(`${baseUrl}/api/items/${item.id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${studentToken}` }
+  });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { id: item.id });
+  const adminAfterDelete = await (await fetch(`${baseUrl}/api/admin/dashboard`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  })).json();
+  assert.ok(!adminAfterDelete.activeListings.some((listing) => listing.id === item.id));
+  const studentAfterDelete = await (await fetch(`${baseUrl}/api/items`, {
+    headers: { Authorization: `Bearer ${studentToken}` }
+  })).json();
+  assert.ok(!studentAfterDelete.some((listing) => listing.id === item.id));
 });
 
 test('separates admin moderation from student listing and match actions', async () => {
@@ -347,7 +425,7 @@ test('separates admin moderation from student listing and match actions', async 
   assert.equal(normalizeListingStatus('MATCHED'), 'open');
 
   const deniedDashboard = await fetch(`${baseUrl}/api/admin/dashboard`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(deniedDashboard.status, 403);
 
@@ -357,7 +435,7 @@ test('separates admin moderation from student listing and match actions', async 
     category: 'Other',
     type: 'found',
     location: 'Admin test'
-  }, adminCookie);
+  }, adminToken);
   assert.equal(adminPost.status, 403);
 
   const lostPost = await postJson('/api/items', {
@@ -368,7 +446,7 @@ test('separates admin moderation from student listing and match actions', async 
     location: 'Main Library, second floor',
     brand: 'OnePlus',
     color: 'silver'
-  }, studentCookie);
+  }, studentToken);
   assert.equal(lostPost.status, 201);
   const lost = await lostPost.json();
   const foundPost = await postJson('/api/items', {
@@ -379,34 +457,34 @@ test('separates admin moderation from student listing and match actions', async 
     location: 'Main Library, second floor',
     brand: 'OnePlus',
     color: 'silver'
-  }, foundOwnerCookie);
+  }, foundOwnerToken);
   assert.equal(foundPost.status, 201);
   const found = await foundPost.json();
   assert.ok(found.possibleMatch);
 
   const adminResolve = await fetch(`${baseUrl}/api/items/${lost.id}/resolve`, {
     method: 'PATCH',
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   });
   assert.equal(adminResolve.status, 403);
   const adminConfirm = await fetch(`${baseUrl}/api/matches/${found.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   });
   assert.equal(adminConfirm.status, 403);
 
   const studentReport = await postJson('/api/items/sample-1/reports', {
     reason: 'This listing contains inappropriate content.'
-  }, studentCookie);
+  }, studentToken);
   assert.equal(studentReport.status, 201);
   const reportBody = await studentReport.json();
   const duplicateReport = await postJson('/api/items/sample-1/reports', {
     reason: 'Duplicate report for the same active post.'
-  }, studentCookie);
+  }, studentToken);
   assert.equal(duplicateReport.status, 409);
 
   const dashboardResponse = await fetch(`${baseUrl}/api/admin/dashboard`, {
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   });
   assert.equal(dashboardResponse.status, 200);
   const dashboard = await dashboardResponse.json();
@@ -423,44 +501,44 @@ test('separates admin moderation from student listing and match actions', async 
 
   const studentDismiss = await fetch(`${baseUrl}/api/admin/reports/${dashboard.reports.find((report) => report.status === 'pending').id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${studentToken}` },
     body: JSON.stringify({ action: 'dismiss' })
   });
   assert.equal(studentDismiss.status, 403);
   const studentRemove = await fetch(`${baseUrl}/api/admin/items/sample-1/remove`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Cookie: studentCookie },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${studentToken}` },
     body: JSON.stringify({ reason: 'Unauthorized attempt.' })
   });
   assert.equal(studentRemove.status, 403);
 
   const dismiss = await fetch(`${baseUrl}/api/admin/reports/${reportBody.report.id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ action: 'dismiss' })
   });
   assert.equal(dismiss.status, 200);
   const duplicateDismiss = await fetch(`${baseUrl}/api/admin/reports/${reportBody.report.id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ action: 'dismiss' })
   });
   assert.equal(duplicateDismiss.status, 409);
 
   const removed = await fetch(`${baseUrl}/api/admin/items/sample-1/remove`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ reason: 'Confirmed inappropriate campus content.' })
   });
   assert.equal(removed.status, 200);
   assert.equal((await removed.json()).item.status, 'removed');
   const publicItems = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.ok(!publicItems.some((item) => item.id === 'sample-1'));
 
   const updatedDashboard = await (await fetch(`${baseUrl}/api/admin/dashboard`, {
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   })).json();
   assert.equal(updatedDashboard.removedHistory.find((item) => item.id === 'sample-1').status, 'removed');
   assert.ok(!updatedDashboard.activeListings.some((item) => item.id === 'sample-1'));
@@ -468,37 +546,37 @@ test('separates admin moderation from student listing and match actions', async 
   assert.ok(updatedDashboard.auditTrail.some((entry) => entry.action === 'report_dismissed'));
 
   const activeBeforeOwnerConfirmations = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.ok(activeBeforeOwnerConfirmations.some((item) => item.id === lost.id));
   assert.ok(activeBeforeOwnerConfirmations.some((item) => item.id === found.id));
 
   const lostOwnerConfirmation = await fetch(`${baseUrl}/api/matches/${found.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   });
   assert.equal(lostOwnerConfirmation.status, 200);
   assert.equal((await lostOwnerConfirmation.json()).resolved, false);
   const stillActiveAfterOneConfirmation = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.ok(stillActiveAfterOneConfirmation.some((item) => item.id === lost.id));
   assert.ok(stillActiveAfterOneConfirmation.some((item) => item.id === found.id));
 
   const foundOwnerConfirmation = await fetch(`${baseUrl}/api/matches/${found.possibleMatch.id}/confirm-returned`, {
     method: 'POST',
-    headers: { Cookie: foundOwnerCookie }
+    headers: { Authorization: `Bearer ${foundOwnerToken}` }
   });
   assert.equal(foundOwnerConfirmation.status, 200);
   assert.equal((await foundOwnerConfirmation.json()).resolved, true);
 
   const activeAfterBothConfirmations = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: studentCookie }
+    headers: { Authorization: `Bearer ${studentToken}` }
   })).json();
   assert.ok(!activeAfterBothConfirmations.some((item) => item.id === lost.id || item.id === found.id));
   assert.ok(!activeAfterBothConfirmations.some((item) => item.title.toLowerCase().includes('silver wireless earbuds')));
   const historyAfterConfirmations = await (await fetch(`${baseUrl}/api/admin/dashboard`, {
-    headers: { Cookie: adminCookie }
+    headers: { Authorization: `Bearer ${adminToken}` }
   })).json();
   assert.ok(!historyAfterConfirmations.activeListings.some((item) => item.id === lost.id || item.id === found.id));
   assert.equal(historyAfterConfirmations.resolvedHistory.filter((item) => [lost.id, found.id].includes(item.id)).length, 2);
@@ -512,9 +590,9 @@ test('separates admin moderation from student listing and match actions', async 
     role: 'student'
   });
   assert.equal(relogin.status, 200);
-  const reloginCookie = relogin.headers.get('set-cookie').split(';')[0];
+  const reloginToken = (await relogin.json()).token;
   const activeAfterRelogin = await (await fetch(`${baseUrl}/api/items`, {
-    headers: { Cookie: reloginCookie }
+    headers: { Authorization: `Bearer ${reloginToken}` }
   })).json();
   assert.ok(!activeAfterRelogin.some((item) => item.id === lost.id || item.id === found.id));
   const { readItems } = await import('../src/store.js');
