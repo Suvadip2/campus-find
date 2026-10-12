@@ -50,7 +50,15 @@ npm install
 npm run dev
 ```
 
-Vite prints the frontend URL (normally <http://localhost:5173>) and proxies `/api` requests to the Node API at port 3000. API records are stored in `server/data/items.json`.
+Vite prints the frontend URL (normally <http://localhost:5173>) and proxies `/api` requests to the Node API at port 3000. If port 3000 is already in use on your machine, override the API port and proxy target in the shell before starting:
+
+```powershell
+$env:PORT = "3001"
+$env:VITE_API_PROXY = "http://localhost:3001"
+npm run dev
+```
+
+API records are stored in `server/data/items.json`.
 
 For an initial admin with the direct Node development command, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in the shell before `npm run dev`.
 
