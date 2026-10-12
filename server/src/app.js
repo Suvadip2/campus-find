@@ -16,7 +16,7 @@ import {
 const allowedCategories = new Set(['Electronics', 'Keys', 'Bags', 'Books', 'Clothing', 'Other']);
 let requestCount = 0;
 const loginAttempts = new Map();
-const loginWindowMs = 15 * 60 * 1000;
+const loginWindowMs = 1 * 60 * 1000;
 const maxLoginAttempts = 10;
 const maxImageSize = 1024 * 1024;
 const uploadImage = multer({
